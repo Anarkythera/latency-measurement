@@ -4,6 +4,7 @@ import (
 	"latencychecker/chat"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/urfave/cli/v2"
 )
@@ -31,6 +32,12 @@ func main() {
 				Usage:   "`NAME` to identify the client when sending messages",
 				Value:   os.Getenv("HOSTNAME"),
 			},
+			&cli.StringFlag{
+				Name:    "file",
+				Aliases: []string{"f"},
+				Usage:   "Path where to safe the `OUTPUT`",
+				Value:   "/tmp",
+			},
 			&cli.IntFlag{
 				Name:    "messages",
 				Aliases: []string{"m"},
@@ -51,7 +58,13 @@ func main() {
 			},
 		},
 		Action: func(c *cli.Context) error {
-			chat.Start(c.String("api-key"), c.String("channel"), c.String("clientID"), c.Int("messages"), c.Int("delay"), c.Int("wait"))
+			chat.Start(c.String("api-key"),
+				c.String("channel"),
+				c.String("clientID"),
+				strings.TrimSuffix(c.String("file"), "/"),
+				c.Int("messages"), c.Int("delay"),
+				c.Int("wait"),
+			)
 
 			return nil
 		},
