@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"latencychecker/chat/model"
@@ -10,106 +11,201 @@ import (
 	"time"
 
 	"github.com/ably/ably-go/ably"
+	"github.com/sirupsen/logrus"
 )
 
+var log *logrus.Logger
+
+const APPNAME = "latencyChecker"
+
 func Start(apiKey, ch, name, fileLocation string, messageNum, delay, wait int) {
-	fmt.Printf("Starting latencyChecker for client %s\n", name)
-	fmt.Println("Wait: ", wait)
-	fmt.Println("Delay: ", delay)
-
-	// Create mutex to write results
+	log = logrus.New()
 	mu := &sync.Mutex{}
+	results := map[string]map[string][]model.Payload{}
 
-	results := []model.Payload{}
+	log.SetLevel(logrus.InfoLevel)
 
-	//create ably channel
+	log.Formatter.(*logrus.TextFormatter).FullTimestamp = true
+
+	log.Infof("Starting %s for client %s\n", APPNAME, name)
+
 	client, err := ably.NewRealtime(
 		ably.WithKey(apiKey),
 		ably.WithClientID(name),
-		ably.WithEchoMessages(true),
+		ably.WithEchoMessages(false),
 	)
 
 	if err != nil {
-		fmt.Println("Couldn't create ably client")
+		log.Errorf("Couldn't create ably client, %v\n", err)
+		return
 	}
 
 	channel := client.Channels.Get(ch)
 
-	//subscribe to newly created channel
-	subscribe(channel, &results, mu)
+	subscribe(channel, results, mu, name)
 
 	for i := 0; i < messageNum-1; i++ {
-		publishing(channel, createMsg(fmt.Sprintf("%s_%d", name, i)))
-		fmt.Println("sleeping for ", delay)
+		publishing(channel, createMsg(name, i))
 		time.Sleep(time.Duration(delay) * time.Second)
 	}
 
-	publishing(channel, createMsg(fmt.Sprintf("%s_%d", name, messageNum-1)))
-	//Sleep for the wait time, since this is the last message every other must have arrived
+	publishing(channel, createMsg(name, messageNum-1))
 	time.Sleep(time.Duration(wait) * time.Second)
 
-	fmt.Println("Main thread waking")
-
-	// Need to check if it's possible to fully terminate the channel before, to avoid concurrency issues
-	/*fmt.Println("Detatching channel")
 	if err := channel.Detach(context.Background()); err != nil {
-		fmt.Println("Error detatching channel")
-	}*/
-	client.Channels.Release(context.Background(), ch)
+		log.Errorf("Error cleaning ably resources: %v", err)
+	}
 
 	//mu.Lock()
-	results = filterTimedoutMgs(results)
+	results = filterTimedOutMgs(results, wait)
+	//mu.Unlock()
+	//printDebug(results)
+
+	//TODO: Create file, convert latency checker to const, converst csv to const var
+	fileName := fmt.Sprintf("%s/%s_%s_%d.%s", fileLocation, APPNAME, name, time.Now().Unix(), "csv")
+	f, err := os.Create(fileName)
+
+	if err != nil {
+		log.Errorf("Couldn't create file at path %s, %v\n", fileLocation, err)
+	}
+
+	defer f.Close()
+
+	log.Infof("Created file %s at location %s\n", fileName, fileLocation)
+
+	//mu.Lock()
+	if err := createResultsTable(f, results); err != nil {
+		log.Infof("Couldn't write table to file, %v\n", err)
+
+		if err := os.Remove(fileName); err != nil {
+			log.Errorf("Error while deleting file %s %v", fileName, err)
+		}
+
+		return
+	}
 	//mu.Unlock()
 
-	//Create file
-	/*file, err := os.Create(fmt.Sprintf("%s/%s_%d", fileLocation, "latencyChecker", time.Now()))
-	if err != nil {
-		fmt.Printf("Couldn't create file at path %s, %v\n", fileLocation, err)
+	if err := client.Channels.Release(context.Background(), ch); err != nil {
+		log.Errorf("Error cleaning ably resources: %v", err)
 	}
 
-	//err = createResultsTable(file, results)
-	if err != nil {
-		fmt.Printf("Couldn't write table to file, %v\n", err)
-	}*/
-
-	fmt.Printf("Exiting latencyChecker for client %s\n", name)
+	log.Infof("Exiting latencyChecker for client %s\n", name)
 }
 
-func filterTimedoutMgs(results []model.Payload) []model.Payload {
-	for _, elem := range results {
-		fmt.Printf("Elem %+v\n", elem)
+func printDebug(results map[string]map[string][]model.Payload) {
+	for origin, dests := range results {
+		fmt.Println("Origin: ", origin)
+		for dest, elems := range dests {
+			fmt.Println("Destination: ", dest)
+			for _, elem := range elems {
+				fmt.Printf("Elem: %+v\n", elem)
+			}
+		}
+	}
+}
+
+func filterTimedOutMgs(results map[string]map[string][]model.Payload, delay int) map[string]map[string][]model.Payload {
+	index := 0
+
+	for _, destDevices := range results {
+		for destDevice, msgs := range destDevices {
+			for _, msg := range msgs {
+				timeDiff := (msg.DestinationTimestamp - msg.OriginTimestamp) / 1000000
+
+				if timeDiff < int64(delay*1000) {
+					msgs[index] = msg
+					index++
+				}
+			}
+
+			destDevices[destDevice] = msgs[:index]
+			index = 0
+		}
 	}
 
-	//panic("unimplemented")
+	return results
+}
+
+func createResultsTable(file *os.File, results map[string]map[string][]model.Payload) error {
+	title := []string{"Origin Host", "Destination Host", "Minimum Latency", "Maximum Latency", "Average Lantency"}
+	w := csv.NewWriter(file)
+
+	defer w.Flush()
+	// Create column names in first line
+	if err := w.Write(title); err != nil {
+		log.Errorf("Error while writing to file: %v\n", err)
+
+		return err
+	}
+
+	// Process results in to each column, max,min,average of timestamps
+	cvs := processLatency(results, w)
+
+	for _, line := range cvs {
+		if err := w.Write(line.ToSlice()); err != nil {
+			log.Warnf("Error writing line to file, %v\n", err)
+		}
+	}
+
 	return nil
 }
 
-func createResultsTable(file *os.File, results []model.Payload) error {
-	// Create headers names in first line
-	//
-	// Process results in to each column, max,min,average of timestamps
-	panic("unimplemented")
+func processLatency(results map[string]map[string][]model.Payload, w *csv.Writer) []model.CvsLine {
+
+	lines := []model.CvsLine{}
+
+	for originDevice, dests := range results {
+		line := model.CvsLine{
+			OriginDevice: originDevice,
+		}
+		for dest, elems := range dests {
+			line.DestinationDevice = dest
+
+			for _, elem := range elems {
+				diff := (elem.DestinationTimestamp - elem.OriginTimestamp) / 1000000
+				if diff < line.MinLatency || line.MinLatency == 0 {
+					line.MinLatency = diff
+				}
+
+				if diff > line.MaxLatency || line.MaxLatency == 0 {
+					line.MaxLatency = diff
+				}
+
+				line.AverageLatency += diff
+			}
+
+			if len(elems) == 0 {
+				line.AverageLatency = 0
+			} else {
+				line.AverageLatency /= int64(len(elems))
+			}
+
+			lines = append(lines, line)
+		}
+	}
+
+	return lines
 }
 
 func publishing(channel *ably.RealtimeChannel, msg model.Payload) {
-	fmt.Println("Publishing msg ", msg)
-	// Publish the message typed in to the Ably Channel
 	err := channel.Publish(context.Background(), "message", msg)
-	// await confirmation that message was received by Ably
 	if err != nil {
-		err := fmt.Errorf("publishing to channel: %w", err)
-		fmt.Println(err)
+		log.Errorf("Publishing to channel, %v", err)
 	}
 }
 
 //TODO: missing verification of destination and such
-func subscribe(channel *ably.RealtimeChannel, results *[]model.Payload, mu *sync.Mutex) {
+func subscribe(channel *ably.RealtimeChannel, results map[string]map[string][]model.Payload, mu *sync.Mutex, clientID string) {
 	// Subscribe to messages sent on the channel
 	_, err := channel.SubscribeAll(context.Background(), func(msg *ably.Message) {
-		fmt.Printf("Received message from %v: '%v with Timestamp: %v'\n", msg.ClientID, msg.Data)
+		//fmt.Printf("Received message from %v with Timestamp: %v\n", msg.ClientID, msg.Data)
+		log.Infof("Received message from %v with Timestamp: %v\n", msg.ClientID, msg.Data)
+		timestamp := time.Now().UnixNano()
 		tmp := &model.Payload{}
-		json.Unmarshal([]byte(msg.Data.(string)), &tmp)
-		saveMessage(results, tmp, mu)
+		if err := json.Unmarshal([]byte(msg.Data.(string)), &tmp); err != nil {
+			log.Warnf("Couldn't unmarshal msg %v, error: %v\n", msg.Data, err)
+		}
+		verifyMessage(tmp, clientID, timestamp, results, mu, channel)
 	})
 	if err != nil {
 		err := fmt.Errorf("subscribing to channel: %w", err)
@@ -117,17 +213,34 @@ func subscribe(channel *ably.RealtimeChannel, results *[]model.Payload, mu *sync
 	}
 }
 
-func saveMessage(results *[]model.Payload, tmp *model.Payload, mu *sync.Mutex) {
-	fmt.Println("SAVing msf")
-	mu.Lock()
-	*results = append(*results, *tmp)
-	mu.Unlock()
-	//fmt.Println("end SAVing msf")
+// without the verification origin == clientID everyone gets every result except when they are the same destiniation
+func verifyMessage(tmp *model.Payload, clientID string, timestamp int64, results map[string]map[string][]model.Payload, mu *sync.Mutex, channel *ably.RealtimeChannel) {
+	if tmp.DestinationDevice != "" && tmp.DestinationTimestamp != 0 {
+		saveMessage(results, tmp, mu)
+	}
+
+	if tmp.DestinationDevice == "" || tmp.DestinationTimestamp == 0 {
+		tmp.DestinationDevice = clientID
+		tmp.DestinationTimestamp = timestamp
+		tmp.Message += fmt.Sprintf(", received in device %s", clientID)
+		publishing(channel, *tmp)
+	}
 }
 
-func createMsg(name string) model.Payload {
+func saveMessage(results map[string]map[string][]model.Payload, tmp *model.Payload, mu *sync.Mutex) {
+	mu.Lock()
+	if _, ok := results[tmp.OriginDevice]; !ok {
+		results[tmp.OriginDevice] = map[string][]model.Payload{}
+	}
+
+	results[tmp.OriginDevice][tmp.DestinationDevice] = append(results[tmp.OriginDevice][tmp.DestinationDevice], *tmp)
+	mu.Unlock()
+}
+
+func createMsg(name string, msgNum int) model.Payload {
 	return model.Payload{
 		Message:              fmt.Sprintf("Sending message from device %s", name),
+		MessageNum:           msgNum,
 		OriginDevice:         name,
 		OriginTimestamp:      time.Now().UnixNano(),
 		DestinationDevice:    "",
