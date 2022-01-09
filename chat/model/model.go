@@ -1,6 +1,6 @@
 package model
 
-import "fmt"
+import "strconv"
 
 type Payload struct {
 	Message              string
@@ -21,10 +21,10 @@ type CvsLine struct {
 
 func (l CvsLine) ToSlice() []string {
 	return []string{
-		fmt.Sprintf("Origin Device: %s", l.OriginDevice),
-		fmt.Sprintf("Destination Device: %s", l.DestinationDevice),
-		fmt.Sprintf("Minimum Latency: %d milliseconds", l.MinLatency),
-		fmt.Sprintf("Maximum Latency: %d milliseconds", l.MaxLatency),
-		fmt.Sprintf("Average Latency: %d milliseconds", l.AverageLatency),
+		l.OriginDevice,
+		l.DestinationDevice,
+		strconv.FormatInt(l.MinLatency, 10),
+		strconv.FormatInt(l.MaxLatency, 10),
+		strconv.FormatInt(l.AverageLatency, 10),
 	}
 }

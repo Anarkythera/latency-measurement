@@ -22,8 +22,8 @@ func main() {
 			},
 			&cli.StringFlag{
 				Name:     "api-key",
-				EnvVars:  []string{"ABLY_API_KEY"},
-				Usage:    "Ably API `KEY` for the channel",
+				EnvVars:  []string{"API_KEY"},
+				Usage:    "API `KEY` to create the channel",
 				Required: true,
 			},
 			&cli.StringFlag{
