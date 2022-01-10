@@ -35,7 +35,7 @@ func main() {
 			&cli.StringFlag{
 				Name:    "file",
 				Aliases: []string{"f"},
-				Usage:   "Path where to safe the `OUTPUT`",
+				Usage:   "Path where to save the `OUTPUT`",
 				Value:   "/tmp",
 			},
 			&cli.IntFlag{
@@ -53,7 +53,7 @@ func main() {
 			&cli.IntFlag{
 				Name:    "delay",
 				Aliases: []string{"d"},
-				Usage:   "Delay between sending messages by 'SECONDS'",
+				Usage:   "Delay between sending messages in 'SECONDS'",
 				Value:   5,
 			},
 		},
